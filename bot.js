@@ -574,6 +574,27 @@ bot.onText(/\/contacts/, (msg) => {
     }
 });
 
+// --- НОВАЯ КОМАНДА ДЛЯ АДМИНА: Перезагрузка меню ---
+bot.onText(/\/reloadmenu/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    // Проверяем, что команду отправил администратор
+    if (!isAdmin(chatId)) {
+        // Обычным пользователям ничего не отвечаем, чтобы не раскрывать команду
+        console.log(`Пользователь ${chatId} попытался использовать команду /reloadmenu`);
+        return;
+    }
+
+    try {
+        await bot.sendMessage(chatId, '⏳ Перезавантажую дані меню з Google Таблиці...');
+        await loadMenuData(); // Вызываем нашу функцию для загрузки данных
+        await bot.sendMessage(chatId, '✅ Кеш меню успішно оновлено!');
+    } catch (error) {
+        console.error('Помилка при ручному перезавантаженні меню:', error);
+        await bot.sendMessage(chatId, '❌ Сталася помилка під час оновлення меню.');
+    }
+});
+
 // --- ГЛАВНЫЙ ОБРАБОТЧИК CALLBACK-КНОПОК ---
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
