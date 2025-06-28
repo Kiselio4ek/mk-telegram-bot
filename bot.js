@@ -2,8 +2,8 @@
 
 // 1. Імпортуємо необхідні бібліотеки
 const TelegramBot = require('node-telegram-bot-api');
-const express = require('express'); // НОВЕ: Необхідно для створення HTTP-сервера
-const config = require('./config'); // Використовуємо ваш існуючий файл config
+const express = require('express'); // ОБОВ'ЯЗКОВО: Імпортуємо express
+const config = require('./config'); // Ваш файл config з змінними оточення
 const { initializeGoogleSheets, getSheetData, updateSheetCell, appendOrUpdateSheetRow, triggerAppsScriptUpdate } = require('./utils/googleSheets');
 const fs = require('fs');
 const path = require('path');
@@ -11,12 +11,11 @@ const path = require('path');
 // --- НАСТРОЙКИ ВЕБХУКА ---
 // Render автоматично надає ці змінні оточення
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN; // Ваш токен бота, береться з змінних оточення Render
-// RENDER_EXTERNAL_HOSTNAME - це публічний URL вашого сервісу на Render
-const WEBHOOK_URL = process.env.RENDER_EXTERNAL_HOSTNAME;
+const WEBHOOK_URL = process.env.RENDER_EXTERNAL_HOSTNAME; // Публічний URL вашого сервісу на Render
 const PORT = process.env.PORT; // Порт, на якому ваш сервер буде слухати запити від Render
 
 // 2. Створюємо ЄДИНИЙ екземпляр бота
-// ВАЖЛИВО: видаляємо { polling: true }, бо тепер використовуємо вебхуки.
+// ВАЖЛИВО: без { polling: true }, бо тепер використовуємо вебхуки.
 const bot = new TelegramBot(TOKEN);
 
 // 3. Створюємо Express-додаток для обробки HTTP-запитів від Telegram
@@ -26,110 +25,41 @@ const app = express();
 app.use(express.json());
 
 // 4. Визначаємо маршрут (endpoint) для вебхука Telegram.
-// Telegram буде надсилати оновлення на цей URL.
-// `/bot${TOKEN}` - це рекомендований Telegram'ом шлях для вебхука, що містить токен для безпеки.
 app.post(`/bot${TOKEN}`, (req, res) => {
     // Обробляємо вхідне оновлення, передаючи його в бібліотеку node-telegram-bot-api
     bot.processUpdate(req.body);
     // ДУЖЕ ВАЖЛИВО: Відповідаємо Telegram'у статусом 200 OK.
     // Це повідомляє Telegram, що оновлення було успішно отримано і оброблено.
-    // Якщо не відповісти 200 OK, Telegram буде намагатися надсилати оновлення знову.
     res.sendStatus(200);
 });
 
-// --- ДОПОМІЖНІ ФУНКЦІЇ (без змін у логіці, просто перенесено) ---
+// --- ДОПОМІЖНІ ФУНКЦІЇ (перенесені до початку файлу для зручності) ---
 
-// Функція для встановлення команд меню бота
-async function setBotCommands() {
-    try {
-        await bot.setMyCommands([
-            { command: 'start', description: 'Розпочати роботу з ботом' },
-            { command: 'mk_classes', description: 'Майстер-класи' },
-            { command: 'services', description: 'Послуги' },
-            { command: 'faq', description: 'Поширені питання' },
-            { command: 'contacts', description: 'Зв\'язатись з нами' },
-        ]);
-        console.log('Команди меню успішно встановлені.');
-    } catch (error) {
-        console.error('Помилка при встановленні команд меню:', error.message);
-    }
-}
-
-// Кеш для даних меню
-let mainMenuCache = new Map();
-// Функція для завантаження та кешування даних меню з Google Таблиці
-async function loadMenuData() {
-    try {
-        const data = await getSheetData(config.MAIN_MENU_SHEET_NAME);
-        if (data.length === 0) {
-            console.warn('У таблиці меню немає даних.');
-            return;
-        }
-
-        const headers = data[0];
-        const rows = data.slice(1);
-        const newCache = new Map();
-
-        for (const row of rows) {
-            const item = headers.reduce((obj, header, index) => {
-                obj[header] = row[index] !== undefined ? String(row[index]) : '';
-                return obj;
-            }, {});
-
-            const menuId = item['ID_МЕНЮ'];
-            if (menuId) {
-                if (!newCache.has(menuId)) {
-                    newCache.set(menuId, []);
-                }
-                newCache.get(menuId).push(item);
-            }
-        }
-        mainMenuCache = newCache;
-        console.log('Дані меню успішно завантажено та кешовано.');
-    } catch (error) {
-        console.error('Помилка завантаження даних меню:', error.message);
-    }
-}
-
-// Состояние пользователей для обработки многошаговых сценариев
+// Стан користувачів для обробки багатокрокових сценаріїв
 const userStates = new Map(); // Map<chatId, { step: string, data: object }>
 
-// Вспомогательная функция для задержки
+// Допоміжна функція для затримки
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ АДМИНИСТРАТОРА ---
-/**
- * Проверяет, является ли пользователь администратором.
- * @param {number|string} chatId ID пользователя.
- * @returns {boolean} True, если пользователь админ.
- */
+// --- ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ АДМІНІСТРАТОРА ---
 function isAdmin(chatId) {
     return config.ADMIN_IDS.map(String).includes(String(chatId));
 }
 
-// ----- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ФОРМАТИРОВАНИЯ СООБЩЕНИЙ -----
-
+// ----- ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ ФОРМАТУВАННЯ ПОВІДОМЛЕНЬ -----
 function getMkFullName(mkType) {
     switch (mkType) {
-        case 'дитячий':
-            return '"Дитячий МК в міні-групі" (від п\'яти до п\'ятнадцяти років)';
-        case 'дорослий':
-            return '"Дорослий МК в міні-групі"';
-        case 'індивідуальний':
-            return '"Індивідуальний МК"';
-        default:
-            return mkType;
+        case 'дитячий': return '"Дитячий МК в міні-групі" (від п\'яти до п\'ятнадцяти років)';
+        case 'дорослий': return '"Дорослий МК в міні-групі"';
+        case 'індивідуальний': return '"Індивідуальний МК"';
+        default: return mkType;
     }
 }
 
 function formatParticipants(count) {
     const num = Math.abs(count);
-    if (num % 10 === 1 && num % 100 !== 11) {
-        return `${count} учасник`;
-    }
-    if ([2, 3, 4].includes(num % 10) && ![12, 13, 14].includes(num % 100)) {
-        return `${count} учасника`;
-    }
+    if (num % 10 === 1 && num % 100 !== 11) return `${count} учасник`;
+    if ([2, 3, 4].includes(num % 10) && ![12, 13, 14].includes(num % 100)) return `${count} учасника`;
     return `${count} учасників`;
 }
 
@@ -139,10 +69,9 @@ function formatDateForMessage(dateString) {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     return `${day}.${month}`;
 }
+// ----- КІНЕЦЬ ДОПОМІЖНИХ ФУНКЦІЙ -----
 
-// ----- КОНЕЦ ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ -----
-
-// Функция для получения данных пользователя из таблицы "Цікаві МК"
+// Функція для отримання даних користувача з таблиці "Цікаві МК"
 async function getUserDataFromSheet(userId) {
     const data = await getSheetData(config.INTERESTED_MK_SHEET_NAME);
     const headers = data[0] || [];
@@ -161,7 +90,7 @@ async function getUserDataFromSheet(userId) {
         const row = data[i];
         if (String(row[userIdColIndex]) === String(userId)) {
             return {
-                rowNumber: i + 1, // Номер строки в таблице
+                rowNumber: i + 1, // Номер рядка в таблиці
                 id: row[userIdColIndex],
                 username: row[usernameColIndex] || '',
                 first_name: row[firstNameColIndex] || '',
@@ -173,7 +102,7 @@ async function getUserDataFromSheet(userId) {
     return null;
 }
 
-// Функция для обновления информации о пользователе в таблице "Цікаві МК"
+// Функція для оновлення інформації про користувача в таблиці "Цікаві МК"
 async function updateUserInfoInSheet(userId, username, firstName, lastName, phoneNumber) {
     const data = await getSheetData(config.INTERESTED_MK_SHEET_NAME);
     const headers = data[0] || [];
@@ -219,11 +148,11 @@ async function updateUserInfoInSheet(userId, username, firstName, lastName, phon
     }
 }
 /**
- * Отправляет сообщения и кнопки из данных таблицы для одного ID_МЕНЮ.
- * @param {number} chatId ID чата
- * @param {Array<object>} menuData Массив объектов меню
- * @param {object} userData Данные пользователя
- * @param {boolean} [isMainMenuForAdmin=false] Флаг для добавления админ-кнопки в главное меню
+ * Відправляє повідомлення та кнопки з даних таблиці для одного ID_МЕНЮ.
+ * @param {number} chatId ID чату
+ * @param {Array<object>} menuData Масив об'єктів меню
+ * @param {object} userData Дані користувача
+ * @param {boolean} [isMainMenuForAdmin=false] Прапор для додавання адмін-кнопки в головне меню
  */
 async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = false) {
     let lastSentContentMessageId = null;
@@ -251,8 +180,7 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
             try {
                 await bot.editMessageReplyMarkup({ inline_keyboard: inlineKeyboardButtons }, { chat_id: chatId, message_id: lastSentContentMessageId });
             } catch (e) {
-                // Игнорируем ошибку, если не удалось отредактировать (например, сообщение слишком старое)
-                console.warn(`Не удалось добавить кнопки к предыдущему сообщению: ${e.message}`);
+                console.warn(`Не вдалося додати кнопки до попереднього повідомлення: ${e.message}`);
             }
             inlineKeyboardButtons.length = 0;
         }
@@ -355,6 +283,59 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
         }
     }
 }
+
+// Функція для встановлення команд меню бота
+async function setBotCommands() {
+    try {
+        await bot.setMyCommands([
+            { command: 'start', description: 'Розпочати роботу з ботом' },
+            { command: 'mk_classes', description: 'Майстер-класи' },
+            { command: 'services', description: 'Послуги' },
+            { command: 'faq', description: 'Поширені питання' },
+            { command: 'contacts', description: 'Зв\'язатись з нами' },
+        ]);
+        console.log('Команди меню успішно встановлені.');
+    } catch (error) {
+        console.error('Помилка при встановленні команд меню:', error.message);
+    }
+}
+
+// Кеш для даних меню
+let mainMenuCache = new Map();
+// Функція для завантаження та кешування даних меню з Google Таблиці
+async function loadMenuData() {
+    try {
+        const data = await getSheetData(config.MAIN_MENU_SHEET_NAME);
+        if (data.length === 0) {
+            console.warn('У таблиці меню немає даних.');
+            return;
+        }
+
+        const headers = data[0];
+        const rows = data.slice(1);
+        const newCache = new Map();
+
+        for (const row of rows) {
+            const item = headers.reduce((obj, header, index) => {
+                obj[header] = row[index] !== undefined ? String(row[index]) : '';
+                return obj;
+            }, {});
+
+            const menuId = item['ID_МЕНЮ'];
+            if (menuId) {
+                if (!newCache.has(menuId)) {
+                    newCache.set(menuId, []);
+                }
+                newCache.get(menuId).push(item);
+            }
+        }
+        mainMenuCache = newCache;
+        console.log('Дані меню успішно завантажено та кешовано.');
+    } catch (error) {
+        console.error('Помилка завантаження даних меню:', error.message);
+    }
+}
+
 
 // Обновляем кэш меню каждые 30 минут
 setInterval(loadMenuData, 30 * 60 * 1000);
@@ -469,15 +450,15 @@ async function sendAdminSlotSelection(chatId, mkType, actionType) {
 }
 
 /**
- * Запускает процесс подтверждения записей на завтра.
- * @param {number|string} chatId ID чата администратора.
+ * Запускає процес підтвердження записів на завтра.
+ * @param {number|string} chatId ID чату адміністратора.
  */
 async function startConfirmationProcess(chatId) {
     try {
         await bot.sendMessage(chatId, '⏳ Завантажую зведення на завтра...');
         const summaryData = await getSheetData(config.SUMMARY_SHEET_NAME);
 
-        if (summaryData.length <= 1) { // <= 1, чтобы учесть строку с заголовками
+        if (summaryData.length <= 1) { // <= 1, щоб врахувати рядок із заголовками
             await bot.sendMessage(chatId, '✅ На завтра записів через бота немає.');
             return;
         }
@@ -537,7 +518,7 @@ async function startConfirmationProcess(chatId) {
         await bot.sendMessage(chatId, '❌ Сталася помилка під час завантаження зведення.');
     }
 }
-// --- ОБРАБОТЧИКИ КОМАНД ---
+// --- ОБРОБНИКИ КОМАНД ---
 
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
@@ -594,15 +575,14 @@ bot.onText(/\/contacts/, (msg) => {
 bot.onText(/\/reloadmenu/, async (msg) => {
     const chatId = msg.chat.id;
 
-    // Перевіряємо, що команду відправив адміністратор
     if (!isAdmin(chatId)) {
         console.log(`Користувач ${chatId} спробував використати команду /reloadmenu`);
-        return; // Звичайним користувачам нічого не відповідаємо, щоб не розкривати команду
+        return;
     }
 
     try {
         await bot.sendMessage(chatId, '⏳ Перезавантажую дані меню з Google Таблиці...');
-        await loadMenuData(); // Викликаємо нашу функцію для завантаження даних
+        await loadMenuData();
         await bot.sendMessage(chatId, '✅ Кеш меню успішно оновлено!');
     } catch (error) {
         console.error('Помилка при ручному перезавантаженні меню:', error);
@@ -648,7 +628,7 @@ bot.on('callback_query', async (query) => {
                 await startConfirmationProcess(chatId);
                 return;
             }
-            const actionType = parts[2]; // 'record' або 'cancel'
+            const actionType = parts[2];
             userStates.set(chatId, { step: `admin_${actionType}_select_mk`, data: {} });
             await sendAdminMkTypeSelection(chatId, actionType);
             return;
@@ -694,7 +674,6 @@ bot.on('callback_query', async (query) => {
             return;
         }
 
-        // --- НОВА ЛОГІКА: Групування записів по User ID ---
         const clientsData = {};
         for (const record of recordsToConfirm) {
             const clientChatId = record['User ID'];
@@ -710,7 +689,6 @@ bot.on('callback_query', async (query) => {
                 participants: record['Participants']
             });
         }
-        // --- КІНЕЦЬ НОВОЇ ЛОГІКИ ---
 
         await bot.sendMessage(chatId, `🚀 Розпочинаю відправку підтверджень для ${Object.keys(clientsData).length} унікальних клієнтів...`);
 
@@ -885,7 +863,7 @@ bot.on('callback_query', async (query) => {
         if (menuData) {
             await sendMenu(chatId, menuData, query.from);
         } else {
-            console.error("Не найден раздел меню с ID 'location'");
+            console.error("Не знайдено розділ меню з ID 'location'");
             await bot.sendMessage(chatId, "Вибачте, не вдалося знайти інформацію про локацію.");
         }
         return;
@@ -1101,14 +1079,14 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-// Обработчик контактов
+// Обробник контактів
 bot.on('contact', async (msg) => {
     const chatId = msg.chat.id;
     const contact = msg.contact;
     const currentState = userStates.get(chatId);
 
     if (!currentState) {
-        await bot.sendMessage(chatId, 'Дякуємо! Щоб розпочати, скористайтеся командой /start.');
+        await bot.sendMessage(chatId, 'Дякуємо! Щоб розпочати, скористайтеся командою /start.');
         return;
     }
 
@@ -1129,17 +1107,16 @@ bot.on('contact', async (msg) => {
             await bot.sendMessage(chatId, nameRequestMessage['ТЕКСТ/НАЗВАНИЕ'], { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
         }
     } else {
-        await bot.sendMessage(chatId, 'Дякуємо! Щоб розпочати, скористайтеся командой /start.');
+        await bot.sendMessage(chatId, 'Дякуємо! Щоб розпочати, скористайтеся командою /start.');
     }
 });
 
 
-// Обработчик текстовых сообщений
+// Обробник текстових повідомлень
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    // Игнорируем команды и контакты, они обрабатываются в других местах
     if (!text || text.startsWith('/') || msg.contact) {
         return;
     }
@@ -1213,11 +1190,9 @@ bot.on('message', async (msg) => {
             await bot.sendMessage(chatId, 'Сталася критична помилка під час оновлення даних в таблиці.');
             userStates.delete(chatId);
         }
-        return; // Завершуємо обробку для адміна
+        return;
     }
-    // --- КІНЕЦЬ АДМІН-БЛОКУ ---
 
-    // --- Логіка для клієнтів ---
     const user = msg.from;
 
     if (currentState.step === 'await_phone_number') {
@@ -1385,12 +1360,10 @@ bot.on('message', async (msg) => {
             userStates.delete(chatId);
         }
     } else {
-        await bot.sendMessage(chatId, 'Вибачте, я не зрозумів ваше повідомлення. Будь ласка, скористайтеся кнопками або розпочніть знову командой /start.');
+        await bot.sendMessage(chatId, 'Вибачте, я не зрозумів ваше повідомлення. Будь ласка, скористайтеся кнопками або розпочніть знову командою /start.');
     }
 });
-/**
- * Отправляет календарь доступных дат для бронирования.
- */
+
 async function sendAvailableDates(chatId, scheduleSheetName, mkType) {
     try {
         const inlineKeyboard = [];
@@ -1499,9 +1472,6 @@ async function sendAvailableDates(chatId, scheduleSheetName, mkType) {
         await bot.sendMessage(chatId, 'Сталася помилка при отриданні доступних дат.');
     }
 }
-/**
- * Отправляет кнопки с доступными часами для выбранной даты.
- */
 async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkType) {
     try {
         const inlineKeyboard = [];
@@ -1602,6 +1572,3 @@ async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkTyp
         await bot.sendMessage(chatId, 'Сталася помилка при отриданні доступних годин.');
     }
 }
-
-// Запуск бота (эта строка будет заменена на app.listen)
-console.log('Бот запускається...');
