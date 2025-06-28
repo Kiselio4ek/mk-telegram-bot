@@ -10,8 +10,6 @@ const fs = require('fs');
 
 const path = require('path');
 
-
-const path = require('path');
 const express = require('express'); // НОВЕ: Імпорт Express
 const app = express(); // НОВЕ: Ініціалізація Express-додатка
 app.use(express.json()); // НОВЕ: Middleware для розбору JSON-тіла запиту (для вебхуків)
