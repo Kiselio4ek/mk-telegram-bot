@@ -1,13 +1,45 @@
-// bot.js
+// bot.js - Оновлений файл для використання вебхуків на Render.com
+
+// 1. Імпортуємо необхідні бібліотеки
 const TelegramBot = require('node-telegram-bot-api');
-const config = require('./config');
+const express = require('express'); // НОВЕ: Необхідно для створення HTTP-сервера
+const config = require('./config'); // Використовуємо ваш існуючий файл config
 const { initializeGoogleSheets, getSheetData, updateSheetCell, appendOrUpdateSheetRow, triggerAppsScriptUpdate } = require('./utils/googleSheets');
 const fs = require('fs');
 const path = require('path');
 
-const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
+// --- НАСТРОЙКИ ВЕБХУКА ---
+// Render автоматично надає ці змінні оточення
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN; // Ваш токен бота, береться з змінних оточення Render
+// RENDER_EXTERNAL_HOSTNAME - це публічний URL вашого сервісу на Render
+const WEBHOOK_URL = process.env.RENDER_EXTERNAL_HOSTNAME;
+const PORT = process.env.PORT; // Порт, на якому ваш сервер буде слухати запити від Render
 
-// --- УСТАНОВКА КОМАНД МЕНЮ ---
+// 2. Створюємо ЄДИНИЙ екземпляр бота
+// ВАЖЛИВО: видаляємо { polling: true }, бо тепер використовуємо вебхуки.
+const bot = new TelegramBot(TOKEN);
+
+// 3. Створюємо Express-додаток для обробки HTTP-запитів від Telegram
+const app = express();
+
+// Middleware для розбору JSON-тіла запиту. Telegram надсилає оновлення у форматі JSON.
+app.use(express.json());
+
+// 4. Визначаємо маршрут (endpoint) для вебхука Telegram.
+// Telegram буде надсилати оновлення на цей URL.
+// `/bot${TOKEN}` - це рекомендований Telegram'ом шлях для вебхука, що містить токен для безпеки.
+app.post(`/bot${TOKEN}`, (req, res) => {
+    // Обробляємо вхідне оновлення, передаючи його в бібліотеку node-telegram-bot-api
+    bot.processUpdate(req.body);
+    // ДУЖЕ ВАЖЛИВО: Відповідаємо Telegram'у статусом 200 OK.
+    // Це повідомляє Telegram, що оновлення було успішно отримано і оброблено.
+    // Якщо не відповісти 200 OK, Telegram буде намагатися надсилати оновлення знову.
+    res.sendStatus(200);
+});
+
+// --- ДОПОМІЖНІ ФУНКЦІЇ (без змін у логіці, просто перенесено) ---
+
+// Функція для встановлення команд меню бота
 async function setBotCommands() {
     try {
         await bot.setMyCommands([
@@ -23,15 +55,41 @@ async function setBotCommands() {
     }
 }
 
-// Инициализируем Google Sheets API и запускаем бота
-initializeGoogleSheets().then(() => {
-    console.log('Бот запущений та підключений до Google Sheets API.');
-    setBotCommands();
-    loadMenuData(); // Загружаем меню сразу после инициализации
-}).catch(err => {
-    console.error('Помилка при запуску бота:', err);
-    process.exit(1);
-});
+// Кеш для даних меню
+let mainMenuCache = new Map();
+// Функція для завантаження та кешування даних меню з Google Таблиці
+async function loadMenuData() {
+    try {
+        const data = await getSheetData(config.MAIN_MENU_SHEET_NAME);
+        if (data.length === 0) {
+            console.warn('У таблиці меню немає даних.');
+            return;
+        }
+
+        const headers = data[0];
+        const rows = data.slice(1);
+        const newCache = new Map();
+
+        for (const row of rows) {
+            const item = headers.reduce((obj, header, index) => {
+                obj[header] = row[index] !== undefined ? String(row[index]) : '';
+                return obj;
+            }, {});
+
+            const menuId = item['ID_МЕНЮ'];
+            if (menuId) {
+                if (!newCache.has(menuId)) {
+                    newCache.set(menuId, []);
+                }
+                newCache.get(menuId).push(item);
+            }
+        }
+        mainMenuCache = newCache;
+        console.log('Дані меню успішно завантажено та кешовано.');
+    } catch (error) {
+        console.error('Помилка завантаження даних меню:', error.message);
+    }
+}
 
 // Состояние пользователей для обработки многошаговых сценариев
 const userStates = new Map(); // Map<chatId, { step: string, data: object }>
@@ -39,14 +97,13 @@ const userStates = new Map(); // Map<chatId, { step: string, data: object }>
 // Вспомогательная функция для задержки
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- НОВАЯ ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ АДМИНИСТРАТОРА ---
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ АДМИНИСТРАТОРА ---
 /**
  * Проверяет, является ли пользователь администратором.
  * @param {number|string} chatId ID пользователя.
  * @returns {boolean} True, если пользователь админ.
  */
 function isAdmin(chatId) {
-    // Убедимся, что сравниваем строки со строками для надежности
     return config.ADMIN_IDS.map(String).includes(String(chatId));
 }
 
@@ -189,7 +246,7 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
 
         let currentContentMessageId = null;
         let currentContentMessageText = null;
-        
+
         if ((type === 'message' || type === 'photo' || type === 'location') && lastSentContentMessageId && inlineKeyboardButtons.length > 0) {
             try {
                 await bot.editMessageReplyMarkup({ inline_keyboard: inlineKeyboardButtons }, { chat_id: chatId, message_id: lastSentContentMessageId });
@@ -199,7 +256,7 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
             }
             inlineKeyboardButtons.length = 0;
         }
-        
+
         if (type === 'message') {
             const msg = await bot.sendMessage(chatId, parsedText, { parse_mode: 'HTML' });
             currentContentMessageId = msg.message_id;
@@ -269,7 +326,7 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
 
             inlineKeyboardButtons.push([{ text: parsedText, callback_data: buttonCallbackData, url: buttonUrl }]);
         }
-        
+
         if (currentContentMessageId) {
             lastSentContentMessageId = currentContentMessageId;
             lastSentContentMessageText = currentContentMessageText;
@@ -279,7 +336,7 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
     if (isMainMenuForAdmin && isAdmin(chatId)) {
         inlineKeyboardButtons.push([{ text: '⚙️ Системне', callback_data: 'admin_menu' }]);
     }
-    
+
     if (inlineKeyboardButtons.length > 0) {
         const replyMarkup = { inline_keyboard: inlineKeyboardButtons };
         const targetMessageId = lastSentContentMessageId;
@@ -296,43 +353,6 @@ async function sendMenu(chatId, menuData, userData = {}, isMainMenuForAdmin = fa
         } else {
             await bot.sendMessage(chatId, 'Оберіть опцію:', { reply_markup: replyMarkup });
         }
-    }
-}
-
-/**
- * Загружает и кэширует данные меню из Google Таблицы.
- */
-let mainMenuCache = new Map();
-async function loadMenuData() {
-    try {
-        const data = await getSheetData(config.MAIN_MENU_SHEET_NAME);
-        if (data.length === 0) {
-            console.warn('У таблиці меню немає даних.');
-            return;
-        }
-
-        const headers = data[0];
-        const rows = data.slice(1);
-        const newCache = new Map();
-
-        for (const row of rows) {
-            const item = headers.reduce((obj, header, index) => {
-                obj[header] = row[index] !== undefined ? String(row[index]) : '';
-                return obj;
-            }, {});
-
-            const menuId = item['ID_МЕНЮ'];
-            if (menuId) {
-                if (!newCache.has(menuId)) {
-                    newCache.set(menuId, []);
-                }
-                newCache.get(menuId).push(item);
-            }
-        }
-        mainMenuCache = newCache;
-        console.log('Дані меню успішно завантажено та кешовано.');
-    } catch (error) {
-        console.error('Помилка завантаження даних меню:', error.message);
     }
 }
 
@@ -386,8 +406,8 @@ async function sendAdminSlotSelection(chatId, mkType, actionType) {
         const maxCol = headers.indexOf('Макс. учасників');
 
         if ([dateCol, timeCol, typeCol, bookedCol, statusCol, maxCol].includes(-1)) {
-             await bot.sendMessage(chatId, 'Помилка: відсутні необхідні колонки в аркуші "Графік".');
-             return;
+            await bot.sendMessage(chatId, 'Помилка: відсутні необхідні колонки в аркуші "Графік".');
+            return;
         }
 
         const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Kyiv' }));
@@ -401,7 +421,7 @@ async function sendAdminSlotSelection(chatId, mkType, actionType) {
             const isCorrectMkType = row[typeCol] === mkType;
             const currentBooked = parseInt(row[bookedCol], 10) || 0;
             const maxParticipants = parseInt(row[maxCol], 10) || Infinity;
-            
+
             const isAvailableForRecord = actionType === 'record' && row[statusCol] === 'Доступне' && currentBooked < maxParticipants;
             const isOccupiedForCancel = actionType === 'cancel' && currentBooked > 0;
 
@@ -455,7 +475,7 @@ async function sendAdminSlotSelection(chatId, mkType, actionType) {
 async function startConfirmationProcess(chatId) {
     try {
         await bot.sendMessage(chatId, '⏳ Завантажую зведення на завтра...');
-     const summaryData = await getSheetData(config.SUMMARY_SHEET_NAME);
+        const summaryData = await getSheetData(config.SUMMARY_SHEET_NAME);
 
         if (summaryData.length <= 1) { // <= 1, чтобы учесть строку с заголовками
             await bot.sendMessage(chatId, '✅ На завтра записів через бота немає.');
@@ -463,12 +483,12 @@ async function startConfirmationProcess(chatId) {
         }
 
         const headers = summaryData[0].map(h => h.trim());
-      const requiredHeaders = ['User ID', 'First Name', 'MK Type', 'Date', 'Time', 'Participants'];
+        const requiredHeaders = ['User ID', 'First Name', 'MK Type', 'Date', 'Time', 'Participants'];
         if (!requiredHeaders.every(h => headers.includes(h))) {
             await bot.sendMessage(chatId, `❌ Помилка: у листі "Сводка на завтра" відсутні необхідні заголовки. Потрібні: ${requiredHeaders.join(', ')}`);
             return;
         }
-            const records = summaryData.slice(1).map(row => {
+        const records = summaryData.slice(1).map(row => {
             const record = {};
             headers.forEach((header, index) => {
                 record[header] = row[index];
@@ -478,7 +498,7 @@ async function startConfirmationProcess(chatId) {
 
         const groupedByTime = {};
         for (const record of records) {
-            const time = record['Time']; // <-- ИСПРАВЛЕНИЕ: Берем время напрямую
+            const time = record['Time'];
             if (!groupedByTime[time]) {
                 groupedByTime[time] = {
                     totalParticipants: 0,
@@ -488,7 +508,7 @@ async function startConfirmationProcess(chatId) {
             groupedByTime[time].totalParticipants += parseInt(record['Participants'], 10);
             groupedByTime[time].clients.push(record['First Name']);
         }
-        
+
         let summaryMessage = `🔔 **Зведення записів на завтра:**\n\n`;
         const sortedTimes = Object.keys(groupedByTime).sort();
 
@@ -496,8 +516,7 @@ async function startConfirmationProcess(chatId) {
             const { totalParticipants, clients } = groupedByTime[time];
             summaryMessage += `🔹 **${time}** - ${formatParticipants(totalParticipants)} (${clients.join(', ')})\n`;
         }
-        
-        // Сохраняем все записи в состояние администратора для последующей отправки
+
         userStates.set(chatId, {
             step: 'awaiting_confirmation_choice',
             data: { recordsToConfirm: records }
@@ -505,11 +524,10 @@ async function startConfirmationProcess(chatId) {
 
         const inline_keyboard = [
             [{ text: '✅ Підтвердити для всіх', callback_data: 'confirm_all_clients' }],
-            // [{ text: '📝 Підтвердити вибірково', callback_data: 'confirm_selective' }], // Эту кнопку можно добавить позже
             [{ text: '◀️ Назад до меню', callback_data: 'admin_menu' }]
         ];
-        
-        await bot.sendMessage(chatId, summaryMessage, { 
+
+        await bot.sendMessage(chatId, summaryMessage, {
             parse_mode: 'Markdown',
             reply_markup: { inline_keyboard }
         });
@@ -526,8 +544,6 @@ bot.onText(/\/start/, async (msg) => {
     userStates.set(chatId, { step: 'main', data: {} });
     const mainMenu = mainMenuCache.get('main');
     if (mainMenu) {
-        // Передаем 'true' в последнем параметре, чтобы функция знала, 
-        // что нужно проверить ID и, если это админ, добавить системную кнопку
         await sendMenu(chatId, mainMenu, msg.from, true);
     } else {
         await bot.sendMessage(chatId, 'Вибачте, головне меню не знайдено.');
@@ -574,20 +590,19 @@ bot.onText(/\/contacts/, (msg) => {
     }
 });
 
-// --- НОВАЯ КОМАНДА ДЛЯ АДМИНА: Перезагрузка меню ---
+// --- НОВА КОМАНДА ДЛЯ АДМІНА: Перезавантаження меню ---
 bot.onText(/\/reloadmenu/, async (msg) => {
     const chatId = msg.chat.id;
 
-    // Проверяем, что команду отправил администратор
+    // Перевіряємо, що команду відправив адміністратор
     if (!isAdmin(chatId)) {
-        // Обычным пользователям ничего не отвечаем, чтобы не раскрывать команду
-        console.log(`Пользователь ${chatId} попытался использовать команду /reloadmenu`);
-        return;
+        console.log(`Користувач ${chatId} спробував використати команду /reloadmenu`);
+        return; // Звичайним користувачам нічого не відповідаємо, щоб не розкривати команду
     }
 
     try {
         await bot.sendMessage(chatId, '⏳ Перезавантажую дані меню з Google Таблиці...');
-        await loadMenuData(); // Вызываем нашу функцию для загрузки данных
+        await loadMenuData(); // Викликаємо нашу функцію для завантаження даних
         await bot.sendMessage(chatId, '✅ Кеш меню успішно оновлено!');
     } catch (error) {
         console.error('Помилка при ручному перезавантаженні меню:', error);
@@ -595,7 +610,7 @@ bot.onText(/\/reloadmenu/, async (msg) => {
     }
 });
 
-// --- ГЛАВНЫЙ ОБРАБОТЧИК CALLBACK-КНОПОК ---
+// --- ГОЛОВНИЙ ОБРОБНИК CALLBACK-КНОПОК ---
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
@@ -610,7 +625,7 @@ bot.on('callback_query', async (query) => {
     console.log(`[callback_query] User: ${chatId}, Data: "${data}"`);
 
     // ===================================================================
-    // БЛОК 1: Логика для Администратора (ручные действия и запуск подтверждений)
+    // БЛОК 1: Логіка для Адміністратора (ручні дії та запуск підтверджень)
     // ===================================================================
     if (isAdmin(chatId) && data.startsWith('admin_')) {
         const parts = data.split('_');
@@ -633,7 +648,7 @@ bot.on('callback_query', async (query) => {
                 await startConfirmationProcess(chatId);
                 return;
             }
-            const actionType = parts[2]; // 'record' или 'cancel'
+            const actionType = parts[2]; // 'record' або 'cancel'
             userStates.set(chatId, { step: `admin_${actionType}_select_mk`, data: {} });
             await sendAdminMkTypeSelection(chatId, actionType);
             return;
@@ -642,7 +657,7 @@ bot.on('callback_query', async (query) => {
         if (command === 'select') {
             const entity = parts[2];
             const actionType = parts[3];
-            
+
             if (entity === 'mk') {
                 const mkType = parts[4];
                 userStates.set(chatId, { step: `admin_${actionType}_select_slot`, data: { mkType } });
@@ -661,246 +676,225 @@ bot.on('callback_query', async (query) => {
     }
 
     // ===================================================================
-    // БЛОК 2: Логика процесса подтверждения (начинается админом, продолжается клиентом)
+    // БЛОК 2: Логіка процесу підтвердження (починається адміном, продовжується клієнтом)
     // ===================================================================
-    
-   // ЗАМЕНИТЕ ВАШ СТАРЫЙ БЛОК НА ЭТОТ
-if (data === 'confirm_all_clients') {
-    if (!isAdmin(chatId)) return;
 
-    const adminState = userStates.get(chatId);
-    if (!adminState || !adminState.data || !adminState.data.recordsToConfirm) {
-        await bot.sendMessage(chatId, 'Помилка: дані для підтвердження застаріли. Спробуйте знову.');
-        return;
-    }
+    if (data === 'confirm_all_clients') {
+        if (!isAdmin(chatId)) return;
 
-    const { recordsToConfirm } = adminState.data;
-    if (recordsToConfirm.length === 0) {
-        await bot.sendMessage(chatId, 'Немає записів для підтвердження.');
-        return;
-    }
-
-    // --- НОВАЯ ЛОГИКА: Группировка записей по User ID ---
-    const clientsData = {};
-    for (const record of recordsToConfirm) {
-        const clientChatId = record['User ID'];
-        if (!clientsData[clientChatId]) {
-            clientsData[clientChatId] = {
-                name: record['First Name'],
-                bookings: []
-            };
+        const adminState = userStates.get(chatId);
+        if (!adminState || !adminState.data || !adminState.data.recordsToConfirm) {
+            await bot.sendMessage(chatId, 'Помилка: дані для підтвердження застаріли. Спробуйте знову.');
+            return;
         }
-        clientsData[clientChatId].bookings.push({
-            date: record['Date'],
-            time: record['Time'],
-            participants: record['Participants']
+
+        const { recordsToConfirm } = adminState.data;
+        if (recordsToConfirm.length === 0) {
+            await bot.sendMessage(chatId, 'Немає записів для підтвердження.');
+            return;
+        }
+
+        // --- НОВА ЛОГІКА: Групування записів по User ID ---
+        const clientsData = {};
+        for (const record of recordsToConfirm) {
+            const clientChatId = record['User ID'];
+            if (!clientsData[clientChatId]) {
+                clientsData[clientChatId] = {
+                    name: record['First Name'],
+                    bookings: []
+                };
+            }
+            clientsData[clientChatId].bookings.push({
+                date: record['Date'],
+                time: record['Time'],
+                participants: record['Participants']
+            });
+        }
+        // --- КІНЕЦЬ НОВОЇ ЛОГІКИ ---
+
+        await bot.sendMessage(chatId, `🚀 Розпочинаю відправку підтверджень для ${Object.keys(clientsData).length} унікальних клієнтів...`);
+
+        for (const clientChatId in clientsData) {
+            const client = clientsData[clientChatId];
+            const clientName = client.name;
+
+            let bookingsText = '';
+            let totalParticipants = 0;
+
+            for (const booking of client.bookings) {
+                const formattedDate = new Date(booking.date).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' });
+                bookingsText += `\n- **${formattedDate} о ${booking.time}** (${formatParticipants(parseInt(booking.participants, 10))})`;
+                totalParticipants += parseInt(booking.participants, 10);
+            }
+
+            try {
+                const messageText = `Доброго дня, ${clientName}!☺️\n\n` +
+                    `Нагадуємо про ваш запис (записи) на майстер-клас завтра:${bookingsText}\n\n` +
+                    `Будь ласка, підтвердьте свою присутність.`;
+
+                const recordId = `${clientChatId}_${totalParticipants}`;
+
+                const inline_keyboard = [
+                    [{ text: '✅ Так, я буду', callback_data: `client_confirm_${recordId}` }],
+                    [{ text: '❌ Змінились плани, скасуйте запис', callback_data: `client_cancel_all_${recordId}` }],
+                    [{ text: '❓ З\'явились питання?', callback_data: `client_question_${recordId}` }]
+                ];
+
+                await bot.sendMessage(clientChatId, messageText, {
+                    parse_mode: 'Markdown',
+                    reply_markup: { inline_keyboard }
+                });
+                await sleep(300);
+            } catch (e) {
+                console.error(`Не вдалося відправити повідомлення клієнту ${clientChatId}:`, e);
+                await bot.sendMessage(chatId, `⚠️ Не вдалося відправити повідомлення клієнту ${clientName} (ID: ${clientChatId}).`);
+            }
+        }
+        await bot.sendMessage(chatId, '✅ Відправку завершено!');
+        userStates.delete(chatId);
+        return;
+    }
+
+    if (data.startsWith('client_confirm_')) {
+        const clientChatId = data.split('_')[2];
+        const clientName = query.from.first_name;
+
+        await bot.sendMessage(chatId, `Дякуємо за підтвердження, ${clientName}! ❤️\nЧекаємо на вас!`, {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: '📍 Де ми знаходимось?', callback_data: 'show_location' },
+                    { text: '❓ Поширені питання', callback_data: 'faq' }
+                ]]
+            }
         });
-    }
-    // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
-
-    await bot.sendMessage(chatId, `🚀 Розпочинаю відправку підтверджень для ${Object.keys(clientsData).length} унікальних клієнтів...`);
-
-    for (const clientChatId in clientsData) {
-        const client = clientsData[clientChatId];
-        const clientName = client.name;
-        
-        let bookingsText = '';
-        let totalParticipants = 0;
-        
-        for (const booking of client.bookings) {
-            const formattedDate = new Date(booking.date).toLocaleDateString('uk-UA', {day: '2-digit', month: '2-digit'});
-            bookingsText += `\n- **${formattedDate} о ${booking.time}** (${formatParticipants(parseInt(booking.participants, 10))})`;
-            totalParticipants += parseInt(booking.participants, 10);
-        }
 
         try {
-            const messageText = `Доброго дня, ${clientName}!☺️\n\n` +
-                              `Нагадуємо про ваш запис (записи) на майстер-клас завтра:${bookingsText}\n\n` +
-                              `Будь ласка, підтвердьте свою присутність.`;
-            
-            // Теперь в ID для отмены передаем только ID клиента и общее кол-во участников
-            // Дата и время будут найдены в таблице по ID клиента
-            const recordId = `${clientChatId}_${totalParticipants}`;
+            if (config.ADMIN_CHAT_ID) {
+                const userData = await getUserDataFromSheet(clientChatId);
+                const phoneNumber = userData ? userData.phone_number : 'не знайдено';
 
-            const inline_keyboard = [
-                [{ text: '✅ Так, я буду', callback_data: `client_confirm_${recordId}` }],
-                [{ text: '❌ Змінились плани, скасуйте запис', callback_data: `client_cancel_all_${recordId}` }], // Новая команда отмены
-                [{ text: '❓ З\'явились питання?', callback_data: `client_question_${recordId}` }]
-            ];
+                const summaryData = await getSheetData(config.SUMMARY_SHEET_NAME);
+                const headers = summaryData[0].map(h => h.trim());
+                const userIdCol = headers.indexOf('User ID');
 
-            await bot.sendMessage(clientChatId, messageText, { 
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard }
-            });
-            await sleep(300);
+                const clientBookings = summaryData.slice(1).filter(row => row[userIdCol] === clientChatId);
+
+                let bookingsDetails = '';
+                if (clientBookings.length > 0) {
+                    const dateCol = headers.indexOf('Date');
+                    const timeCol = headers.indexOf('Time');
+                    const participantsCol = headers.indexOf('Participants');
+
+                    bookingsDetails = clientBookings.map(b =>
+                        `\n- ${new Date(b[dateCol]).toLocaleDateString('uk-UA')} о ${b[timeCol]} (${formatParticipants(parseInt(b[participantsCol], 10))})`
+                    ).join('');
+                }
+
+                const adminMessage = `✅ **Клієнт підтвердив запис**\n\n` +
+                    `<b>Ім'я:</b> ${clientName}\n` +
+                    `<b>Телефон:</b> ${phoneNumber}\n` +
+                    `<b>ID:</b> ${clientChatId}\n` +
+                    `<b>Записи:</b>${bookingsDetails}`;
+
+                await bot.sendMessage(config.ADMIN_CHAT_ID, adminMessage, { parse_mode: 'HTML' });
+            }
         } catch (e) {
-            console.error(`Не вдалося відправити повідомлення клієнту ${clientChatId}:`, e);
-            await bot.sendMessage(chatId, `⚠️ Не вдалося відправити повідомлення клієнту ${clientName} (ID: ${clientChatId}).`);
+            console.error("Помилка при відправці розширеного повідомлення адміну:", e);
+            await bot.sendMessage(config.ADMIN_CHAT_ID, `✅ Клієнт ${clientName} (ID: ${chatId}) підтвердив(ла) свій запис.`);
         }
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: query.message.chat.id, message_id: query.message.message_id });
+        return;
     }
-    await bot.sendMessage(chatId, '✅ Відправку завершено!');
-    userStates.delete(chatId);
-    return;
-}
 
-// ЗАМЕНИТЕ ВАШ СТАРЫЙ БЛОК 'client_confirm_' НА ЭТОТ
-// ЗАМЕНИТЕ ВАШ СТАРЫЙ БЛОК 'client_confirm_' НА ЭТОТ
-if (data.startsWith('client_confirm_')) {
-    const clientChatId = data.split('_')[2];
-    const clientName = query.from.first_name;
+    if (data.startsWith('client_cancel_all_')) {
+        const clientChatIdToCancel = data.split('_')[3];
+        const clientName = query.from.first_name;
 
-    await bot.sendMessage(chatId, `Дякуємо за підтвердження, ${clientName}! ❤️\nЧекаємо на вас!`, {
-        reply_markup: {
-            inline_keyboard: [[
-                { text: '📍 Де ми знаходимось?', callback_data: 'show_location' },
-                { text: '❓ Поширені питання', callback_data: 'faq' }
-            ]]
-        }
-    });
+        await bot.sendMessage(chatId, 'Дуже шкода, що ваші плани змінились. Всі ваші записи на завтра скасовано. Будемо раді бачити вас іншим разом! ✨');
 
-    // --- НОВАЯ ЛОГИКА: Собираем данные для админа ---
-    try {
-        if (config.ADMIN_CHAT_ID) {
-            // Получаем номер телефона
-            const userData = await getUserDataFromSheet(clientChatId);
+        try {
+            const userData = await getUserDataFromSheet(clientChatIdToCancel);
             const phoneNumber = userData ? userData.phone_number : 'не знайдено';
 
-            // Получаем детали записей из сводки
             const summaryData = await getSheetData(config.SUMMARY_SHEET_NAME);
+            if (!summaryData || summaryData.length <= 1) return;
+
             const headers = summaryData[0].map(h => h.trim());
             const userIdCol = headers.indexOf('User ID');
-            
-            const clientBookings = summaryData.slice(1).filter(row => row[userIdCol] === clientChatId);
-            
+            const dateCol = headers.indexOf('Date');
+            const timeCol = headers.indexOf('Time');
+            const participantsCol = headers.indexOf('Participants');
+
+            const recordsToCancel = summaryData.slice(1).filter(row => row[userIdCol] === clientChatIdToCancel);
+
             let bookingsDetails = '';
-            if (clientBookings.length > 0) {
-                const dateCol = headers.indexOf('Date');
-                const timeCol = headers.indexOf('Time');
-                const participantsCol = headers.indexOf('Participants');
-                
-                bookingsDetails = clientBookings.map(b => 
+            if (recordsToCancel.length > 0) {
+                bookingsDetails = recordsToCancel.map(b =>
                     `\n- ${new Date(b[dateCol]).toLocaleDateString('uk-UA')} о ${b[timeCol]} (${formatParticipants(parseInt(b[participantsCol], 10))})`
                 ).join('');
             }
 
-            const adminMessage = `✅ **Клієнт підтвердив запис**\n\n` +
-                               `<b>Ім'я:</b> ${clientName}\n` +
-                               `<b>Телефон:</b> ${phoneNumber}\n` +
-                               `<b>ID:</b> ${clientChatId}\n` +
-                               `<b>Записи:</b>${bookingsDetails}`;
+            for (const record of recordsToCancel) {
+                const dateToCancel = record[dateCol];
+                const timeToCancel = record[timeCol];
+                const participantsToCancel = parseInt(record[participantsCol], 10);
 
-            await bot.sendMessage(config.ADMIN_CHAT_ID, adminMessage, { parse_mode: 'HTML' });
-        }
-    } catch(e) {
-        console.error("Помилка при відправці розширеного повідомлення адміну:", e);
-        // Отправляем простое уведомление, если что-то пошло не так
-        await bot.sendMessage(config.ADMIN_CHAT_ID, `✅ Клієнт ${clientName} (ID: ${chatId}) підтвердив(ла) свій запис.`);
-    }
-     // --- ДОБАВЛЕНО: Убираем кнопки с исходного сообщения ---
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: query.message.chat.id, message_id: query.message.message_id });
-    return;
-}
-    // ЗАМЕНИТЕ ВАШ СТАРЫЙ БЛОК 'client_cancel_all_' НА ЭТОТ
-if (data.startsWith('client_cancel_all_')) {
-    const clientChatIdToCancel = data.split('_')[3];
-    const clientName = query.from.first_name;
+                const scheduleData = await getSheetData('График');
+                const scheduleHeaders = scheduleData[0];
+                const schDateCol = scheduleHeaders.indexOf('Дата');
+                const schTimeCol = scheduleHeaders.indexOf('Час');
+                const schBookedCol = scheduleHeaders.indexOf('Записано');
 
-    await bot.sendMessage(chatId, 'Дуже шкода, що ваші плани змінились. Всі ваші записи на завтра скасовано. Будемо раді бачити вас іншим разом! ✨');
+                let rowIndexToUpdate = scheduleData.findIndex((row, i) => i > 0 && new Date(row[schDateCol]).toISOString().split('T')[0] === dateToCancel && row[schTimeCol] === timeToCancel);
 
-    try {
-        // Получаем номер телефона
-        const userData = await getUserDataFromSheet(clientChatIdToCancel);
-        const phoneNumber = userData ? userData.phone_number : 'не знайдено';
+                if (rowIndexToUpdate !== -1) {
+                    const currentBooked = parseInt(scheduleData[rowIndexToUpdate][schBookedCol], 10) || 0;
+                    const newBookedValue = Math.max(0, currentBooked - participantsToCancel);
+                    const cellRange = `${String.fromCharCode(65 + schBookedCol)}${rowIndexToUpdate + 1}`;
+                    await updateSheetCell('График', cellRange, newBookedValue);
+                }
+            }
+            await triggerAppsScriptUpdate();
 
-        // Получаем детали записей для отмены
-        const summaryData = await getSheetData(config.SUMMARY_SHEET_NAME);
-        if (!summaryData || summaryData.length <= 1) return;
+            if (config.ADMIN_CHAT_ID) {
+                const adminMessage = `❌ **Клієнт скасував запис**\n\n` +
+                    `<b>Ім'я:</b> ${clientName}\n` +
+                    `<b>Телефон:</b> ${phoneNumber}\n` +
+                    `<b>ID:</b> ${clientChatIdToCancel}\n` +
+                    `<b>Скасовані записи:</b>${bookingsDetails}`;
 
-        const headers = summaryData[0].map(h => h.trim());
-        const userIdCol = headers.indexOf('User ID');
-        const dateCol = headers.indexOf('Date');
-        const timeCol = headers.indexOf('Time');
-        const participantsCol = headers.indexOf('Participants');
-
-        const recordsToCancel = summaryData.slice(1).filter(row => row[userIdCol] === clientChatIdToCancel);
-        
-        let bookingsDetails = '';
-        if (recordsToCancel.length > 0) {
-            bookingsDetails = recordsToCancel.map(b => 
-                `\n- ${new Date(b[dateCol]).toLocaleDateString('uk-UA')} о ${b[timeCol]} (${formatParticipants(parseInt(b[participantsCol], 10))})`
-            ).join('');
-        }
-
-        // Логика обновления основной таблицы "График"
-        for (const record of recordsToCancel) {
-            const dateToCancel = record[dateCol];
-            const timeToCancel = record[timeCol];
-            const participantsToCancel = parseInt(record[participantsCol], 10);
-
-            const scheduleData = await getSheetData('График');
-            const scheduleHeaders = scheduleData[0];
-            const schDateCol = scheduleHeaders.indexOf('Дата');
-            const schTimeCol = scheduleHeaders.indexOf('Час');
-            const schBookedCol = scheduleHeaders.indexOf('Записано');
-
-            let rowIndexToUpdate = scheduleData.findIndex((row, i) => i > 0 && new Date(row[schDateCol]).toISOString().split('T')[0] === dateToCancel && row[schTimeCol] === timeToCancel);
-
-            if (rowIndexToUpdate !== -1) {
-                const currentBooked = parseInt(scheduleData[rowIndexToUpdate][schBookedCol], 10) || 0;
-                const newBookedValue = Math.max(0, currentBooked - participantsToCancel);
-                const cellRange = `${String.fromCharCode(65 + schBookedCol)}${rowIndexToUpdate + 1}`;
-                await updateSheetCell('График', cellRange, newBookedValue);
+                await bot.sendMessage(config.ADMIN_CHAT_ID, adminMessage, { parse_mode: 'HTML' });
+            }
+        } catch (e) {
+            console.error(`Помилка при скасуванні запису для ${chatId}: ${e.message}`);
+            if (config.ADMIN_CHAT_ID) {
+                await bot.sendMessage(config.ADMIN_CHAT_ID, `⚠️ Помилка автоматичного скасування запису для ${clientName}. Перевірте таблицю "График" вручну.`);
             }
         }
-        await triggerAppsScriptUpdate();
-
-        if (config.ADMIN_CHAT_ID) {
-            const adminMessage = `❌ **Клієнт скасував запис**\n\n` +
-                               `<b>Ім'я:</b> ${clientName}\n` +
-                               `<b>Телефон:</b> ${phoneNumber}\n` +
-                               `<b>ID:</b> ${clientChatIdToCancel}\n` +
-                               `<b>Скасовані записи:</b>${bookingsDetails}`;
-
-            await bot.sendMessage(config.ADMIN_CHAT_ID, adminMessage, { parse_mode: 'HTML' });
-        }
-    } catch (e) {
-        console.error(`Помилка при скасуванні запису для ${chatId}: ${e.message}`);
-        if (config.ADMIN_CHAT_ID) {
-            await bot.sendMessage(config.ADMIN_CHAT_ID, `⚠️ Помилка автоматичного скасування запису для ${clientName}. Перевірте таблицю "График" вручну.`);
-        }
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: query.message.chat.id, message_id: query.message.message_id });
+        return;
     }
-     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: query.message.chat.id, message_id: query.message.message_id });
-    return;
-}
     if (data.startsWith('client_question_')) {
         const menuData = mainMenuCache.get('contacts');
         if (menuData) await sendMenu(chatId, menuData, query.from);
         return;
     }
 
-  // ЗАМЕНИТЕ ВАШ СТАРЫЙ ОБРАБОТЧИК 'show_location' НА ЭТОТ
-// ЗАМЕНИТЕ ВАШ СТАРЫЙ БЛОК 'show_location' НА ЭТОТ
-// ЗАМЕНИТЕ ВАШ СТАРЫЙ ОБРАБОТЧИК 'show_location' НА ЭТОТ ФИНАЛЬНЫЙ ВАРИАНТ
-if (data === 'show_location') {
-    // Находим в кэше раздел меню с ID 'location'
-    const menuData = mainMenuCache.get('location');
-
-    if (menuData) {
-        // И просто отправляем его пользователю.
-        // Ваша функция sendMenu сама отправит и карту, и текст, и кнопки из этого раздела.
-        await sendMenu(chatId, menuData, query.from);
-    } else {
-        // Этот блок на случай, если раздел 'location' не будет найден в таблице "Меню"
-        console.error("Не найден раздел меню с ID 'location'");
-        await bot.sendMessage(chatId, "Вибачте, не вдалося знайти інформацію про локацію.");
+    if (data === 'show_location') {
+        const menuData = mainMenuCache.get('location');
+        if (menuData) {
+            await sendMenu(chatId, menuData, query.from);
+        } else {
+            console.error("Не найден раздел меню с ID 'location'");
+            await bot.sendMessage(chatId, "Вибачте, не вдалося знайти інформацію про локацію.");
+        }
+        return;
     }
-    return;
-}
 
     // ===================================================================
-    // БЛОК 3: Основная логика для клиентов (запись, навигация)
+    // БЛОК 3: Основна логіка для клієнтів (запис, навігація)
     // ===================================================================
-    
+
     if (data.startsWith('back_to_')) {
         let targetMenuId = data.replace('back_to_', '');
         userStates.set(chatId, { step: targetMenuId, data: {} });
@@ -910,13 +904,13 @@ if (data === 'show_location') {
         }
         return;
     }
-    
+
     if (data.startsWith('return_to_date_select_')) {
         const parts = data.split('_');
         if (parts.length >= 5) {
             const mkType = parts[3];
             const scheduleSheet = parts.slice(4).join('_');
-            
+
             userStates.set(chatId, {
                 step: 'await_date_selection',
                 data: { mkType: mkType, scheduleSheet: scheduleSheet, callbackFromParent: `book_${mkType}` }
@@ -981,14 +975,14 @@ if (data === 'show_location') {
         await sendAvailableDates(chatId, scheduleSheet, mkType);
         return;
     }
-    
+
     if (mainMenuCache.has(data)) {
         userStates.set(chatId, { step: data, data: {} });
         const menuData = mainMenuCache.get(data);
         if (menuData) await sendMenu(chatId, menuData, query.from);
         return;
     }
-    
+
     if (data.startsWith('book_') && !data.endsWith('_mk_back_to_date')) {
         let mkType = '';
         let scheduleSheet = '';
@@ -1012,7 +1006,7 @@ if (data === 'show_location') {
         }
         return;
     }
-    
+
     if (data.startsWith('select_date_')) {
         const selectedDate = data.replace('select_date_', '');
         currentState.data.selectedDate = selectedDate;
@@ -1020,11 +1014,11 @@ if (data === 'show_location') {
         await sendAvailableTimes(chatId, currentState.data.scheduleSheet, selectedDate, currentState.data.mkType);
         return;
     }
-    
+
     if (data.startsWith('select_time_')) {
         const selectedTime = data.replace('select_time_', '');
         currentState.data.selectedTime = selectedTime;
-        
+
         const userTelegramId = query.from.id;
         const savedUserData = await getUserDataFromSheet(userTelegramId);
         currentState.data.savedUserData = savedUserData;
@@ -1097,7 +1091,7 @@ if (data === 'show_location') {
 
             await appendOrUpdateSheetRow(config.INTERESTED_MK_SHEET_NAME, [
                 new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' }),
-                user.id, user.username || '', user.first_name || '', user.last_name || '', '', 
+                user.id, user.username || '', user.first_name || '', user.last_name || '', '',
                 foundMkName, '', '', '', 'Зацікавлений'
             ]);
             console.log(`Зафіксовано зацікавленість у МК "${foundMkName}" від користувача ${user.username || user.id}`);
@@ -1128,7 +1122,7 @@ bot.on('contact', async (msg) => {
         userStates.set(chatId, { ...currentState, step: 'await_name_input' });
 
         await updateUserInfoInSheet(userTelegramData.id, userTelegramData.username, userTelegramData.first_name, userTelegramData.last_name, currentState.data.phoneNumber);
-        
+
         const bookMkMenu = mainMenuCache.get('book_mk');
         const nameRequestMessage = bookMkMenu.find(item => item['ТЕКСТ/НАЗВАНИЕ'].includes('ваше ім\'я') && item['ТИП_ЭЛЕМЕНТА'] === 'message');
         if (nameRequestMessage) {
@@ -1159,7 +1153,7 @@ bot.on('message', async (msg) => {
 
     console.log(`[message] User: ${chatId}, Step: "${currentState.step}", Text: "${text}"`);
 
-    // --- НОВЫЙ БЛОК: Обработка ввода админа ---
+    // --- НОВИЙ БЛОК: Обробка введення адміна ---
     if (isAdmin(chatId) && currentState.step.startsWith('admin_await_')) {
         const numParticipantsInput = parseInt(text, 10);
         if (isNaN(numParticipantsInput) || numParticipantsInput <= 0) {
@@ -1174,7 +1168,7 @@ bot.on('message', async (msg) => {
             const scheduleData = await getSheetData(config.SCHEDULE_SHEETS.GENERAL);
             const headers = scheduleData[0];
             const bookedColIndex = headers.indexOf('Записано');
-            
+
             if (bookedColIndex === -1) {
                 await bot.sendMessage(chatId, 'Помилка: не знайдено колонку "Записано" в таблиці.');
                 userStates.delete(chatId);
@@ -1193,7 +1187,7 @@ bot.on('message', async (msg) => {
 
             const cellRange = `${String.fromCharCode(65 + bookedColIndex)}${rowNum}`;
             await updateSheetCell(config.SCHEDULE_SHEETS.GENERAL, cellRange, newBookedValue);
-            
+
             const scriptResult = await triggerAppsScriptUpdate();
             if (!scriptResult.success) {
                 console.error('Не вдалося викликати Google Apps Script Web App:', scriptResult.error);
@@ -1212,18 +1206,18 @@ bot.on('message', async (msg) => {
                 [{ text: '❌ Скасувати ще', callback_data: 'admin_start_cancel' }],
                 [{ text: '🔙 Головне меню', callback_data: 'back_to_main' }]
             ];
-            await bot.sendMessage(chatId, 'Оберіть наступну дію:', { reply_markup: { inline_keyboard }});
+            await bot.sendMessage(chatId, 'Оберіть наступну дію:', { reply_markup: { inline_keyboard } });
 
         } catch (error) {
-            console.error(`[Admin Error] Ошибка при обновлении записи для строки ${rowNum}:`, error);
+            console.error(`[Admin Error] Помилка при оновленні запису для рядка ${rowNum}:`, error);
             await bot.sendMessage(chatId, 'Сталася критична помилка під час оновлення даних в таблиці.');
             userStates.delete(chatId);
         }
-        return; // Завершаем обработку для админа
+        return; // Завершуємо обробку для адміна
     }
-    // --- КОНЕЦ АДМИН-БЛОКА ---
+    // --- КІНЕЦЬ АДМІН-БЛОКУ ---
 
-    // --- Логика для клиентов ---
+    // --- Логіка для клієнтів ---
     const user = msg.from;
 
     if (currentState.step === 'await_phone_number') {
@@ -1290,7 +1284,7 @@ bot.on('message', async (msg) => {
             const maxColIndex = headers.indexOf('Макс. учасників');
 
             if ([dateColIndex, timeColIndex, typeColIndex, bookedColIndex, maxColIndex].includes(-1)) {
-                console.error(`Не найдены необходимые заголовки в листе "${config.SCHEDULE_SHEETS.GENERAL}".`);
+                console.error(`Не знайдені необхідні заголовки в листі "${config.SCHEDULE_SHEETS.GENERAL}".`);
                 await bot.sendMessage(chatId, 'Вибачте, сталася внутрішня помилка. Зверніться до адміністратора.');
                 userStates.delete(chatId);
                 return;
@@ -1309,7 +1303,7 @@ bot.on('message', async (msg) => {
                     break;
                 }
             }
-            
+
             const clientNameForMsg = userName || user.first_name || 'Клієнт';
             const clientPhone = phoneNumber || 'Не надано';
             const clientUsername = user.username ? `@${user.username}` : '(юзернейм не вказано)';
@@ -1319,20 +1313,20 @@ bot.on('message', async (msg) => {
 
             const successHeader = `Повідомлення для клієнта ${clientUsername}:`;
             const successBody = `<code>${clientNameForMsg}, вітаю!☺️\n` +
-                              `Ви забронювали віконце на МК ${mkFullName}, "${formattedDate} ${selectedTime}" (${participantsText})\n` +
-                              `Записали вас на цю дату і час, очікуємо вас на МК☺️\n` +
-                              `Додатково за добу напишемо вам, щоб підтвердити запис.\n` +
-                              `Якщо залишились питання – пишіть ❤️</code>`;
+                `Ви забронювали віконце на МК ${mkFullName}, "${formattedDate} ${selectedTime}" (${participantsText})\n` +
+                `Записали вас на цю дату і час, очікуємо вас на МК☺️\n` +
+                `Додатково за добу напишемо вам, щоб підтвердити запис.\n` +
+                `Якщо залишились питання – пишіть ❤️</code>`;
 
             const failureHeader = `Або`;
             const failureBody = `<code>${clientNameForMsg}, вітаю!☺️\n` +
-                              `Ви забронювали віконце на МК ${mkFullName}, "${formattedDate} ${selectedTime}" (${participantsText})\n` +
-                              `Нажаль, це віконце вже зайняте. Можемо запропонувати вам МК ... о ...\n` +
-                              `Чи буде вам зручно завітати до нас у цей день та час?</code>`;
+                `Ви забронювали віконце на МК ${mkFullName}, "${formattedDate} ${selectedTime}" (${participantsText})\n` +
+                `Нажаль, це віконце вже зайняте. Можемо запропонувати вам МК ... о ...\n` +
+                `Чи буде вам зручно завітати до нас у цей день та час?</code>`;
 
             const adminInfo = `Нове бронювання: Клієнт: ${clientNameForMsg}, Телефон: ${clientPhone}, МК: ${mkFullName}, ${formattedDate} ${selectedTime}, Кількість людей: ${participantsText}`;
             const adminMessage = `${adminInfo}\n\n${successHeader}\n${successBody}\n\n${failureHeader}\n${failureBody}`;
-            
+
             if (rowIndexToUpdate !== -1) {
                 if (config.ADMIN_CHAT_ID) {
                     await bot.sendMessage(config.ADMIN_CHAT_ID, adminMessage, { parse_mode: 'HTML' });
@@ -1351,7 +1345,7 @@ bot.on('message', async (msg) => {
                 const newBookedValue = currentBooked + numParticipants;
                 const cellRange = `${String.fromCharCode(65 + bookedColIndex)}${rowIndexToUpdate + 1}`;
                 await updateSheetCell(config.SCHEDULE_SHEETS.GENERAL, cellRange, newBookedValue);
-                
+
                 const scriptResult = await triggerAppsScriptUpdate();
                 if (!scriptResult.success) {
                     console.error('Не вдалося викликати Google Apps Script Web App:', scriptResult.error);
@@ -1382,11 +1376,11 @@ bot.on('message', async (msg) => {
 
             } else {
                 await bot.sendMessage(chatId, '😔 Вибачте, не вдалося знайти вибраний вами час. Можливо, він вже зайнятий.');
-                userStates.set(chatId, { ...currentState, step: 'await_date_selection' }); 
+                userStates.set(chatId, { ...currentState, step: 'await_date_selection' });
             }
 
         } catch (error) {
-            console.error('[await_participants_input] Критическая ошибка в процессе бронирования:', error.message, error.stack);
+            console.error('[await_participants_input] Критична помилка в процесі бронювання:', error.message, error.stack);
             await bot.sendMessage(chatId, 'Сталася помилка при бронюванні. Будь ласка, спробуйте ще раз або зв’яжіться з адміністратором.');
             userStates.delete(chatId);
         }
@@ -1394,12 +1388,6 @@ bot.on('message', async (msg) => {
         await bot.sendMessage(chatId, 'Вибачте, я не зрозумів ваше повідомлення. Будь ласка, скористайтеся кнопками або розпочніть знову командой /start.');
     }
 });
-/**
- * Отправляет календарь доступных дат для бронирования.
- */
-/**
- * Отправляет календарь доступных дат для бронирования.
- */
 /**
  * Отправляет календарь доступных дат для бронирования.
  */
@@ -1421,7 +1409,7 @@ async function sendAvailableDates(chatId, scheduleSheetName, mkType) {
         const maxCol = headers.indexOf('Макс. учасників');
 
         if ([dateCol, statusCol, typeCol, bookedCol, maxCol].includes(-1)) {
-            console.error(`Не найдены необходимые заголовки на листе "${config.SCHEDULE_SHEETS.GENERAL}".`);
+            console.error(`Не знайдені необхідні заголовки на листі "${config.SCHEDULE_SHEETS.GENERAL}".`);
             await bot.sendMessage(chatId, 'Вибачте, сталася внутрішня помилка. Зверніться до адміністратора.');
             userStates.delete(chatId);
             return;
@@ -1435,32 +1423,29 @@ async function sendAvailableDates(chatId, scheduleSheetName, mkType) {
             const row = scheduleData[i];
             const dateStr = String(row[dateCol] || '').trim();
             if (!dateStr) continue;
-            
+
             try {
                 const eventDate = new Date(dateStr);
                 if (isNaN(eventDate.getTime())) continue;
-                eventDate.setHours(0,0,0,0);
+                eventDate.setHours(0, 0, 0, 0);
 
                 const status = String(row[statusCol] || '').trim();
                 const rowMkType = String(row[typeCol] || '').trim();
                 const currentBooked = parseInt(row[bookedCol], 10) || 0;
-                
-                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Разная логика доступности ---
+
                 let isSlotAvailable;
                 if (rowMkType === 'індивідуальний') {
-                    // Индивидуальный МК доступен, только если никто не записан
                     isSlotAvailable = currentBooked === 0;
                 } else {
-                    // Групповой МК доступен, если есть свободные места
-                    const maxParticipants = parseInt(row[maxCol], 10) || 0; // Если макс. не указано, считаем 0, т.е. закрыто
+                    const maxParticipants = parseInt(row[maxCol], 10) || 0;
                     isSlotAvailable = currentBooked < maxParticipants;
                 }
-                
+
                 if (eventDate >= now && status === 'Доступне' && rowMkType === mkType && isSlotAvailable) {
                     availableDates.add(dateStr);
                 }
-            } catch(e) {
-                console.warn(`Некоректна дата в рядку ${i+1}: ${dateStr}`);
+            } catch (e) {
+                console.warn(`Некоректна дата в рядку ${i + 1}: ${dateStr}`);
             }
         }
 
@@ -1487,17 +1472,17 @@ async function sendAvailableDates(chatId, scheduleSheetName, mkType) {
         if (currentRow.length > 0) {
             inlineKeyboard.push(currentRow);
         }
-        
+
         const currentUserState = userStates.get(chatId);
         if (currentUserState && currentUserState.data.showMoreInfoButton && currentUserState.data.moreInfoMenuId) {
             inlineKeyboard.push([{ text: 'ℹ️ Дізнатись більше про МК', callback_data: currentUserState.data.moreInfoMenuId }]);
         }
-        
+
         let backCallbackData = 'back_to_main';
         if (mkType === 'дитячий') backCallbackData = 'back_to_mk_kids_mini';
         else if (mkType === 'дорослий') backCallbackData = 'back_to_mk_adult_mini';
         else if (mkType === 'індивідуальний') backCallbackData = 'mk_individual';
-        
+
         inlineKeyboard.push([{ text: '🔙 В попереднє меню', callback_data: backCallbackData }]);
 
         let mkTypeGenitive = 'майстер-класу';
@@ -1514,15 +1499,6 @@ async function sendAvailableDates(chatId, scheduleSheetName, mkType) {
         await bot.sendMessage(chatId, 'Сталася помилка при отриданні доступних дат.');
     }
 }
-/**
- * Отправляет кнопки с доступными часами для выбранной даты.
- */
-/**
- * Отправляет кнопки с доступными часами для выбранной даты.
- */
-/**
- * Отправляет кнопки с доступными часами для выбранной даты.
- */
 /**
  * Отправляет кнопки с доступными часами для выбранной даты.
  */
@@ -1557,8 +1533,7 @@ async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkTyp
             const date = row[dateCol];
             if (new Date(date).toISOString().split('T')[0] === selectedDate && row[statusCol] === 'Доступне' && row[typeCol] === mkType) {
                 const booked = parseInt(row[bookedCol] || 0, 10);
-                
-                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Разная логика доступности ---
+
                 let isSlotAvailable;
                 if (mkType === 'індивідуальний') {
                     isSlotAvailable = booked === 0;
@@ -1583,12 +1558,11 @@ async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkTyp
             await sendAvailableDates(chatId, scheduleSheetName, mkType);
             return;
         }
-        
-        availableTimes.sort((a,b) => a.time.localeCompare(b.time));
+
+        availableTimes.sort((a, b) => a.time.localeCompare(b.time));
 
         for (const slot of availableTimes) {
             let buttonText = slot.time;
-            // Для индивидуального МК больше не показываем кол-во мест, т.к. он либо есть, либо его нет
             if (mkType !== 'індивідуальний') {
                 const availableCount = Math.max(0, slot.max - slot.booked);
                 buttonText += ` (вільно ${availableCount})`;
@@ -1599,12 +1573,12 @@ async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkTyp
                 await bot.sendMessage(chatId, slot.notes, { parse_mode: 'HTML' });
             }
         }
-        
+
         const navRow = [];
         if (mkType !== 'індивідуальний') {
             navRow.push({ text: '👥 Більше 5 людей', callback_data: 'book_individual_large_group' });
         }
-        
+
         let backToDateCallback;
         if (mkType === 'дитячий') backToDateCallback = 'book_kids_mk';
         else if (mkType === 'дорослий') backToDateCallback = 'book_adult_mk';
@@ -1613,7 +1587,7 @@ async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkTyp
 
         navRow.push({ text: '🔙 До вибору дати', callback_data: backToDateCallback });
         inlineKeyboard.push(navRow);
-        
+
         let mkTypeGenitive = 'майстер-класу';
         if (mkType === 'дитячий') mkTypeGenitive = 'дитячого майстер-класу';
         else if (mkType === 'дорослий') mkTypeGenitive = 'дорослого майстер-класу';
@@ -1629,5 +1603,5 @@ async function sendAvailableTimes(chatId, scheduleSheetName, selectedDate, mkTyp
     }
 }
 
-// Запуск бота
+// Запуск бота (эта строка будет заменена на app.listen)
 console.log('Бот запускається...');
