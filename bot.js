@@ -14,6 +14,10 @@ const express = require('express'); // НОВЕ: Імпорт Express
 const app = express(); // НОВЕ: Ініціалізація Express-додатка
 app.use(express.json()); // НОВЕ: Middleware для розбору JSON-тіла запиту (для вебхуків)
 
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
 
 // --- НАСТРОЙКИ ВЕБХУКА ---
 // Render автоматично надає ці змінні оточення
